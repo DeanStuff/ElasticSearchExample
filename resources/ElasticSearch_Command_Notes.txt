@@ -1,0 +1,8 @@
+#!/bin/sh
+
+curl -XDELETE 'http://localhost:9200/hadoop'
+curl -XGET 'http://localhost:9200/hadoop/gutenberg/_search?pretty'
+curl -XGET 'http://localhost:9200/hadoop/gutenberg/_search?q=FILENAME:5linc11'
+
+GET hadoop/gutenberg/_search?q=FILENAME=5linc11
+GET hadoop/gutenberg/_search?q=HDFSPath:etext01
