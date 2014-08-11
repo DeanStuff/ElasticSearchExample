@@ -1,3 +1,3 @@
 #!/bin/sh
 
-java -cp ElasticSearch-0.0.1-SNAPSHOT.jar com.jt.ReferenceHdfs hdfs:///in/Gutenberg
+java -cp ElasticSearchExample-0.0.1-SNAPSHOT.jar com.jt.ElasticSearchIndex hdfs:///in/Gutenberg
