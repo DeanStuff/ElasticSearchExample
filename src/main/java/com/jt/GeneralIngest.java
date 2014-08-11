@@ -6,6 +6,7 @@ import java.io.StringReader;
 import java.net.URI;
 import java.net.URISyntaxException;
 import java.util.ArrayList;
+import java.util.Properties;
 import java.util.logging.Logger;
 
 import javax.ws.rs.core.MediaType;
@@ -60,6 +61,30 @@ public class GeneralIngest {
     private static Configuration configuration = new Configuration();
     private static FileSystem filesystem = null;
     private static Path path = null;
+    
+    private static Properties prop = null;
+    
+    
+    
+    public GeneralIngest() {
+    }
+
+    private void loadProperties() {
+        String propFileName = "config.properties";  // static property file included in the jar.  Excluded here for privacy
+ 
+        InputStream inputStream = getClass().getClassLoader().getResourceAsStream(propFileName);
+        if (inputStream != null) {
+            prop = new Properties();
+            try {
+                prop.load(inputStream);
+            } catch (IOException e) {
+                log.info("Problem loading property file: " + propFileName + ".  Exception caught: " + e.getMessage());
+            }
+        } else {
+            log.warning("No property file found.  Set your own properties");
+        }
+        
+    }
 
     public void setInputUri(String inputUri) {
         this.inputUri = inputUri;
@@ -72,9 +97,9 @@ public class GeneralIngest {
         if (outputPath.startsWith(HDFS_PREFIX)) {
             // Initialize HDFS
             configuration.set("fs.hdfs.impl", org.apache.hadoop.hdfs.DistributedFileSystem.class.getName());
-            configuration.addResource(new Path("/etc/hadoop/conf/core-site.xml"));
-            configuration.addResource(new Path("/etc/hadoop/conf/hdfs-site.xml"));
-            configuration.addResource(new Path("/etc/hadoop/conf/mapred-site.xml"));
+            configuration.addResource(new Path(prop.getProperty(Constants.HADOOP_CORE_SITE, "/etc/hadoop/conf/core-site.xml")));
+            configuration.addResource(new Path(prop.getProperty(Constants.HADOOP_HDFS_SITE, "/etc/hadoop/conf/hdfs-site.xml")));
+            configuration.addResource(new Path(prop.getProperty(Constants.HADOOP_MAPRED_SITE, "/etc/hadoop/conf/mapred-site.xml")));
         } else {
             configuration.set("fs.file.impl", org.apache.hadoop.fs.LocalFileSystem.class.getName());
         }
@@ -154,9 +179,9 @@ public class GeneralIngest {
     }
     
     private void processProperties() {
-        setOutputPath(System.getProperty(Properties.OUTPUT_PATH));
-        setInputUri(System.getProperty(Properties.REST_ENDPOINT));
-        useUriPath = Boolean.parseBoolean(System.getProperty(Properties.PRESERVE_PATH, "false"));
+        setOutputPath(prop.getProperty(Constants.OUTPUT_PATH));
+        setInputUri(prop.getProperty(Constants.REST_ENDPOINT));
+        useUriPath = Boolean.parseBoolean(prop.getProperty(Constants.PRESERVE_PATH, "false"));
         
         log.info("Set output path property: " + outputPath);
         log.info("Set uri endpoint property: " + inputUri);
@@ -167,6 +192,7 @@ public class GeneralIngest {
      * store the files to the local or hadoop file system.
      */
     public void run() {
+        loadProperties();
         processProperties();
         
         String htmlResults = (String) clientRequest(inputUri, MediaType.TEXT_HTML_TYPE);
