@@ -8,6 +8,8 @@ import java.net.URISyntaxException;
 import java.util.ArrayList;
 import java.util.Properties;
 import java.util.logging.Logger;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipInputStream;
 
 import javax.ws.rs.core.MediaType;
 import javax.xml.parsers.DocumentBuilder;
@@ -56,6 +58,7 @@ public class GeneralIngest {
     private static String inputUri = "";
     private static String outputPath = "";
     private static boolean useUriPath = false;
+    private static boolean unzip = false;
 
     // Setup Hadoop properties to write to the file system if available.
     private static Configuration configuration = new Configuration();
@@ -145,6 +148,14 @@ public class GeneralIngest {
         return results;
     }
 
+    /**
+     * This method's responsibility is to parse the URLs returned from the client and return a simple ArrayList of them
+     * @param htmlResults
+     * @return
+     * @throws ParserConfigurationException
+     * @throws SAXException
+     * @throws IOException
+     */
     private static ArrayList<String> getGutenbergFiles(String htmlResults) throws ParserConfigurationException, SAXException,
             IOException {
         String uri = null;
@@ -182,9 +193,12 @@ public class GeneralIngest {
         setOutputPath(prop.getProperty(Constants.OUTPUT_PATH));
         setInputUri(prop.getProperty(Constants.REST_ENDPOINT));
         useUriPath = Boolean.parseBoolean(prop.getProperty(Constants.PRESERVE_PATH, "false"));
+        unzip = Boolean.parseBoolean(prop.getProperty(Constants.STORE_UNZIPPED, "false"));
         
         log.info("Set output path property: " + outputPath);
         log.info("Set uri endpoint property: " + inputUri);
+        log.info("Use the uri path: " + useUriPath);
+        log.info("Unzip: " + unzip);
     }
     
     /**
@@ -205,10 +219,13 @@ public class GeneralIngest {
             URI uri = null;
             FSDataOutputStream fileOutputStream = null;
             for (String fileUri : fileUris) {
+                
                 log.info("Want to process file: " + fileUri);
+                
+                // setup the input stream for the file
                 InputStream is  = (InputStream) clientRequest(fileUri, MediaType.WILDCARD_TYPE);
 
-                // parse out the filepath from the url
+                // build the URI for the file so we can parse the object for the path
                 try {
                     uri = new URI(fileUri);
                 } catch (URISyntaxException e) {
@@ -223,13 +240,30 @@ public class GeneralIngest {
                     filesystem.delete(path, true);
                 }
 
-                // create the file and write the contents
-                fileOutputStream = filesystem.create(path);
-                while ( (len=is.read(buffer)) >= 0) {
-                    fileOutputStream.write(buffer, 0, len);
+                if (unzip) {
+                    ZipInputStream zis = new ZipInputStream(is);
+                    ZipEntry ze = null;
+                    String modifiedPath = path.toString().substring(0, path.toString().lastIndexOf(SLASH));
+                    log.info("output path: " + path.toString());
+                    log.info("modified path: " + modifiedPath);
+                    
+                    while ( (ze = zis.getNextEntry()) != null) {
+                        // create the file and write the contents
+                        fileOutputStream = filesystem.create(new Path(modifiedPath + SLASH + ze.getName()));
+                        while ((len = zis.read(buffer)) >= 0) {
+                            fileOutputStream.write(buffer, 0, len);
+                        }
+                        fileOutputStream.close();
+                    }
+                    
+                } else {
+                    // create the file and write the contents
+                    fileOutputStream = filesystem.create(path);
+                    while ((len = is.read(buffer)) >= 0) {
+                        fileOutputStream.write(buffer, 0, len);
+                    }
+                    fileOutputStream.close();
                 }
-                fileOutputStream.close();
-                break;
             }
         } catch (ParserConfigurationException e) {
             // TODO Auto-generated catch block
