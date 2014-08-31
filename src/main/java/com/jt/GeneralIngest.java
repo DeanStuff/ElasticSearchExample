@@ -6,6 +6,7 @@ import java.io.StringReader;
 import java.net.URI;
 import java.net.URISyntaxException;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.Properties;
 import java.util.logging.Logger;
 import java.util.zip.ZipEntry;
@@ -20,6 +21,7 @@ import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FSDataOutputStream;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
+import org.mortbay.log.Log;
 import org.w3c.dom.Document;
 import org.w3c.dom.Element;
 import org.w3c.dom.Node;
@@ -31,30 +33,33 @@ import com.sun.jersey.api.client.Client;
 import com.sun.jersey.api.client.ClientResponse;
 import com.sun.jersey.api.client.WebResource;
 
-
 /**
- * This class is developed as an example to retrieve files from the Gutenberg library via REsTClient 
- * and store the information in either HDFS or local file system.  Either way, I have developed this
- * program to retrieve lots of data to experiment within the Hadoop Cluster.
+ * This class is developed as an example to retrieve files from the Gutenberg
+ * library via REsTClient and store the information in either HDFS or local file
+ * system. Either way, I have developed this program to retrieve lots of data to
+ * experiment within the Hadoop Cluster.
  * 
  * @author dewee
- *
+ * 
  */
 
 public class GeneralIngest {
-    
+
     private static Logger log = Logger.getLogger(GeneralIngest.class.getName());
 
     private static String BODY_START = "<body>";
     private static String BODY_END = "</body>";
     private static String HTTP_FLG = "http";
+    private static String HARVEST_TAG = "harvest";
+    private static String NEXT_PAGE_TAG = "Next Page";
+    private static String HREF_TAG = "href";
     private static String PARAGRAPH_TAG = "p";
     private static String ANCHOR_TAG = "a";
     private static String SLASH = "/";
     private static String HDFS_PREFIX = "hdfs";
-    
+
     private static String APPLICATION_ZIP = "application/zip";
-    
+
     private static String inputUri = "";
     private static String outputPath = "";
     private static boolean useUriPath = false;
@@ -64,17 +69,45 @@ public class GeneralIngest {
     private static Configuration configuration = new Configuration();
     private static FileSystem filesystem = null;
     private static Path path = null;
-    
+
     private static Properties prop = null;
     
+    private static HashMap<String, ArrayList> hrefMap = new HashMap<String, ArrayList>();
     
+    boolean bypassDownload = false;
     
+
     public GeneralIngest() {
     }
 
+    /**
+     * Populate the htmlRef map by adding the href type and the value.
+     * Later on it will pull the sorted list out to process info individually where needed.
+     * Note: This removes repetitive processing over the html resuls, but uses memory to store
+     * the information.  This can be resolved by clearning the html results after popultating the map
+     * @param key - Store the href type like file or harvest
+     * @param value - the url or value
+     */
+    private static void populateHtmlRefs(String key, String value) {
+        ArrayList<String> hrefInfo;
+        if (hrefMap.containsKey(key)) {
+            hrefInfo = hrefMap.get(key);
+        } else {
+            hrefInfo = new ArrayList<String>();
+        }
+        hrefInfo.add(value);
+        hrefMap.put(key, hrefInfo);
+    }
+    
+    /**
+     * This method loads the provided or used properties in the job call into the system here.
+     * The properties are later used to assist in the run of the program.
+     */
     private void loadProperties() {
-        String propFileName = "config.properties";  // static property file included in the jar.  Excluded here for privacy
- 
+        String propFileName = "config.properties"; // static property file
+                                                   // included in the jar.
+                                                   // Excluded here for privacy
+
         InputStream inputStream = getClass().getClassLoader().getResourceAsStream(propFileName);
         if (inputStream != null) {
             prop = new Properties();
@@ -86,17 +119,23 @@ public class GeneralIngest {
         } else {
             log.warning("No property file found.  Set your own properties");
         }
-        
+
     }
 
     public void setInputUri(String inputUri) {
         this.inputUri = inputUri;
     }
 
+    public void setInputUri(String inputUri, String appender) {
+        // no need to check for null. If anything is null, then bubble up the
+        // NPE and exit.
+        this.inputUri = inputUri + appender;
+    }
+
     public void setOutputPath(String outputPath) {
-        
-        this.outputPath = outputPath.endsWith(SLASH) ? outputPath.substring(0, outputPath.length()-1) : outputPath;
-        
+
+        this.outputPath = outputPath.endsWith(SLASH) ? outputPath.substring(0, outputPath.length() - 1) : outputPath;
+
         if (outputPath.startsWith(HDFS_PREFIX)) {
             // Initialize HDFS
             configuration.set("fs.hdfs.impl", org.apache.hadoop.hdfs.DistributedFileSystem.class.getName());
@@ -106,7 +145,7 @@ public class GeneralIngest {
         } else {
             configuration.set("fs.file.impl", org.apache.hadoop.fs.LocalFileSystem.class.getName());
         }
-        
+
         try {
             filesystem = FileSystem.get(configuration);
         } catch (IOException e) {
@@ -114,7 +153,13 @@ public class GeneralIngest {
             e.printStackTrace();
         }
     }
-    
+
+    /**
+     * This method issues the rest call to the provided url
+     * @param uri
+     * @param mediaType
+     * @return
+     */
     public static Object clientRequest(String uri, MediaType mediaType) {
         Object results = null;
 
@@ -128,38 +173,39 @@ public class GeneralIngest {
             log.info("Problem with request: " + response.getStatus());
             return null;
         }
-        
+
         if (response.getType().isCompatible(MediaType.TEXT_HTML_TYPE)) {
             log.info("using string");
             results = response.getEntity(String.class);
         } else if (response.getType().toString().equals(APPLICATION_ZIP)) {
-            log.info("using app zip");
-            log.info("response have an entity: " + response.hasEntity());
-            log.info("response toString: " + response.toString());
-            log.info("response entity tag: " + response.getEntityTag());
+            log.fine("using app zip");
+            log.fine("response have an entity: " + response.hasEntity());
+            log.fine("response toString: " + response.toString());
+            log.fine("response entity tag: " + response.getEntityTag());
             results = response.getEntity(InputStream.class);
         } else {
             log.info("Don't know this type: " + response.getType());
         }
-        
-        log.info("MediaType retrieved: " + response.getType());
-//        log.info("Response is: " + results);
+
+        log.fine("MediaType retrieved: " + response.getType());
+        // log.info("Response is: " + results);
 
         return results;
     }
 
     /**
-     * This method's responsibility is to parse the URLs returned from the client and return a simple ArrayList of them
+     * This method's responsibility is to parse the URLs returned from the
+     * client and return a simple ArrayList of them
+     * 
      * @param htmlResults
      * @return
      * @throws ParserConfigurationException
      * @throws SAXException
      * @throws IOException
      */
-    private static ArrayList<String> getGutenbergFiles(String htmlResults) throws ParserConfigurationException, SAXException,
+    private static void getGutenbergResults(String htmlResults) throws ParserConfigurationException, SAXException,
             IOException {
         String uri = null;
-        ArrayList<String> uris = new ArrayList<String>();
 
         DocumentBuilderFactory dbf = DocumentBuilderFactory.newInstance();
         DocumentBuilder db = dbf.newDocumentBuilder();
@@ -169,112 +215,151 @@ public class GeneralIngest {
         Document doc = db.parse(is);
         NodeList nodes = doc.getElementsByTagName(PARAGRAPH_TAG);
 
-        // iterate the employees
+        // iterate the returned list
         for (int i = 0; i < nodes.getLength(); i++) {
             Element element = (Element) nodes.item(i);
 
             NodeList name = element.getElementsByTagName(ANCHOR_TAG);
             Element line = (Element) name.item(0);
-            uri = getCharacterDataFromElement(line);
-            if (uri.startsWith(HTTP_FLG)) {
-                uris.add(uri);
-            }
+            uri = getNodeValue(line);
+
+            // replacing individual list of zip files with internal map of references retrieved from the html
+            populateHtmlRefs(uri.startsWith(HTTP_FLG) ? HTTP_FLG : HARVEST_TAG, line.getAttribute(HREF_TAG));
         }
 
-        return uris;
     }
 
-    public static String getCharacterDataFromElement(Element e) {
+    public static String getHrefInfo(Element e) {
+        return e.getAttribute(HREF_TAG);
+    }
+
+    public static String getNodeValue(Element e) {
         Node child = e.getFirstChild();
         return child.getNodeValue();
     }
-    
+
     private void processProperties() {
         setOutputPath(prop.getProperty(Constants.OUTPUT_PATH));
-        setInputUri(prop.getProperty(Constants.REST_ENDPOINT));
+        setInputUri(prop.getProperty(Constants.REST_ENDPOINT), prop.getProperty(Constants.REST_FILETYPE));
         useUriPath = Boolean.parseBoolean(prop.getProperty(Constants.PRESERVE_PATH, "false"));
         unzip = Boolean.parseBoolean(prop.getProperty(Constants.STORE_UNZIPPED, "false"));
-        
+
         log.info("Set output path property: " + outputPath);
         log.info("Set uri endpoint property: " + inputUri);
         log.info("Use the uri path: " + useUriPath);
         log.info("Unzip: " + unzip);
     }
-    
+
     /**
-     * This is the main method which retrieves the properties, makes the rest call for file from Gutenberg rest service,
-     * store the files to the local or hadoop file system.
+     * This is the main method which retrieves the properties, makes the rest
+     * call for file from Gutenberg rest service, store the files to the local
+     * or hadoop file system.
      */
     public void run() {
         loadProperties();
         processProperties();
-        
-        String htmlResults = (String) clientRequest(inputUri, MediaType.TEXT_HTML_TYPE);
 
-        log.finest("results: " + htmlResults);
-        try {
-            ArrayList<String> fileUris = getGutenbergFiles(htmlResults.substring(htmlResults.indexOf(BODY_START), htmlResults.indexOf(BODY_END)+BODY_END.length()));
-            byte[] buffer = new byte[1024];
-            int len = 0;
-            URI uri = null;
-            FSDataOutputStream fileOutputStream = null;
-            for (String fileUri : fileUris) {
-                
-                log.info("Want to process file: " + fileUri);
-                
-                // setup the input stream for the file
-                InputStream is  = (InputStream) clientRequest(fileUri, MediaType.WILDCARD_TYPE);
+        // lets setup the url and find the number of iterations we will like to
+        // use
 
-                // build the URI for the file so we can parse the object for the path
-                try {
-                    uri = new URI(fileUri);
-                } catch (URISyntaxException e) {
-                    log.warning("Problem creating uri: " + e.getMessage());
-                }
-                
-                // build up the output path
-                path = new Path(outputPath + SLASH + (useUriPath ? uri.getPath() : fileUri.substring(fileUri.lastIndexOf(SLASH)+1)));
-                
-                // if the file exists, remove it
-                if (filesystem.exists(path)) {
-                    filesystem.delete(path, true);
-                }
+        String filetypeParam = prop.getProperty("jt.input.filetype");
+        int iterations = Integer.parseInt(prop.getProperty("jt.input.iterations", "0"));
 
-                if (unzip) {
-                    ZipInputStream zis = new ZipInputStream(is);
-                    ZipEntry ze = null;
-                    String modifiedPath = path.toString().substring(0, path.toString().lastIndexOf(SLASH));
-                    log.info("output path: " + path.toString());
-                    log.info("modified path: " + modifiedPath);
-                    
-                    while ( (ze = zis.getNextEntry()) != null) {
+        // process over the number of interations to gather flies from the
+        // Gutenberg repository
+
+        ArrayList<String>fileUris = null;
+        for (int a = 0; a < iterations; a++) {
+
+            if (fileUris != null) {
+                fileUris.clear();
+            }
+            hrefMap.clear();
+            // Call request from service
+            log.info("Sending request as: " + inputUri);
+            String htmlResults = (String) clientRequest(inputUri, MediaType.TEXT_HTML_TYPE);
+
+            // process results and store in hdfs
+            log.fine("results: " + htmlResults);
+            try {
+                getGutenbergResults(htmlResults.substring(htmlResults.indexOf(BODY_START), htmlResults.indexOf(BODY_END) + BODY_END.length()));
+                byte[] buffer = new byte[1024];
+                int len = 0;
+                URI uri = null;
+                FSDataOutputStream fileOutputStream = null;
+                // lets process all the files here
+                fileUris = hrefMap.get(HTTP_FLG);
+                if (!bypassDownload) {
+                for (String fileUri : fileUris) {
+
+                    log.fine("Want to process file: " + fileUri);
+
+                    // setup the input stream for the file
+                    InputStream is = (InputStream) clientRequest(fileUri, MediaType.WILDCARD_TYPE);
+
+                    // build the URI for the file so we can parse the object for
+                    // the path
+                    try {
+                        uri = new URI(fileUri);
+                    } catch (URISyntaxException e) {
+                        log.warning("Problem creating uri: " + e.getMessage());
+                    }
+
+                    // build up the output path
+                    path = new Path(outputPath + SLASH
+                            + (useUriPath ? uri.getPath() : fileUri.substring(fileUri.lastIndexOf(SLASH) + 1)));
+
+                    // if the file exists, remove it
+                    if (filesystem.exists(path)) {
+                        filesystem.delete(path, true);
+                    }
+
+                    if (unzip) {
+                        ZipInputStream zis = new ZipInputStream(is);
+                        ZipEntry ze = null;
+                        String modifiedPath = path.toString().substring(0, path.toString().lastIndexOf(SLASH));
+                        log.fine("output path: " + path.toString());
+                        log.fine("modified path: " + modifiedPath);
+
+                        while ((ze = zis.getNextEntry()) != null) {
+                            // create the file and write the contents
+                            try {
+                                fileOutputStream = filesystem.create(new Path(modifiedPath + SLASH + ze.getName()));
+                                while ((len = zis.read(buffer)) >= 0) {
+                                    fileOutputStream.write(buffer, 0, len);
+                                }
+                                fileOutputStream.close();
+                            } catch (Exception e) {
+                                log.warning("Problem processing file: " + modifiedPath + SLASH + ze.getName() + " skipping...");
+                            }
+                        }
+
+                    } else {
                         // create the file and write the contents
-                        fileOutputStream = filesystem.create(new Path(modifiedPath + SLASH + ze.getName()));
-                        while ((len = zis.read(buffer)) >= 0) {
+                        fileOutputStream = filesystem.create(path);
+                        while ((len = is.read(buffer)) >= 0) {
                             fileOutputStream.write(buffer, 0, len);
                         }
                         fileOutputStream.close();
                     }
-                    
-                } else {
-                    // create the file and write the contents
-                    fileOutputStream = filesystem.create(path);
-                    while ((len = is.read(buffer)) >= 0) {
-                        fileOutputStream.write(buffer, 0, len);
-                    }
-                    fileOutputStream.close();
                 }
+                }
+            } catch (ParserConfigurationException e) {
+                // TODO Auto-generated catch block
+                e.printStackTrace();
+            } catch (SAXException e) {
+                // TODO Auto-generated catch block
+                e.printStackTrace();
+            } catch (IOException e) {
+                // TODO Auto-generated catch block
+                e.printStackTrace();
             }
-        } catch (ParserConfigurationException e) {
-            // TODO Auto-generated catch block
-            e.printStackTrace();
-        } catch (SAXException e) {
-            // TODO Auto-generated catch block
-            e.printStackTrace();
-        } catch (IOException e) {
-            // TODO Auto-generated catch block
-            e.printStackTrace();
+            
+            // the next next inputURI to the values retrieved from the Next Page tag.
+            // since there is only one next page in the list, pop the first one off the arraylist
+            setInputUri(prop.getProperty(Constants.REST_ENDPOINT), hrefMap.get(HARVEST_TAG).get(0).toString());
         }
+
     }
 
     public static void main(String args[]) {
