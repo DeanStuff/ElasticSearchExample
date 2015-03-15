@@ -13,6 +13,8 @@ import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.LocatedFileStatus;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.fs.RemoteIterator;
+import org.elasticsearch.action.bulk.BulkRequestBuilder;
+import org.elasticsearch.action.bulk.BulkResponse;
 import org.elasticsearch.action.index.IndexResponse;
 import org.elasticsearch.client.Client;
 import org.elasticsearch.client.transport.TransportClient;
@@ -38,14 +40,23 @@ public class ElasticSearchIndex {
     public static final String GUTENBERG_HDR_END = "*END*";
     public static final String GUTENBERG_COMMENT = "*";
     public static final String BY = "by";
+    public static final String OF = "of";
+    public static final String AUTHOR = "Author";
+    public static final String TITLE = "Title";
+    
+    public static final String FIRST_LINE_PRIMARY_TITLE_TAG = "The Project Gutenberg Etext of";
+    public static final String FIRST_LINE_SECONDARY_TITLE_TAG = "Project Gutenberg Etext";
+    
+    public static final char SLASH_CHAR = '/';
+    public static final char COLON_CHAR = ':';
 
     private static boolean haveTitle = false;
     private static boolean haveAuthor = false;
     private static boolean foundHdr = false;
+    private static boolean firstLine = false;
 
     private JSONObject jsonObject = new JSONObject();
 
-    public static final char SLASH = '/';
     
     private static Properties prop = null;
     
@@ -86,6 +97,10 @@ public class ElasticSearchIndex {
                 .addTransportAddress(new InetSocketTransportAddress(prop.getProperty(Constants.HADOOP_NODE_3), 9300))
                 .addTransportAddress(new InetSocketTransportAddress(prop.getProperty(Constants.HADOOP_NODE_4), 9300));
         
+        // include a bulk loader
+        // this will be used to process directories worth of files in each elasticsearch call.
+        BulkRequestBuilder bulkRequest = client.prepareBulk();
+
         path = new Path(directory);
 
         RemoteIterator<LocatedFileStatus> lfsIterator = filesystem.listFiles(path, true);
@@ -99,8 +114,9 @@ public class ElasticSearchIndex {
             haveAuthor = false;
             haveTitle = false;
             foundHdr = false;
+            firstLine = false;
 
-            jsonObject.put("HDFSPath", parsedPath.substring(0, parsedPath.lastIndexOf(SLASH)));
+            jsonObject.put("HDFSPath", parsedPath.substring(0, parsedPath.lastIndexOf(SLASH_CHAR)));
             jsonObject.put("FILENAME", lfs.getPath().getName());
 
             try {
@@ -108,6 +124,28 @@ public class ElasticSearchIndex {
                 line = br.readLine();
                 while (line != null) {
 
+                	// set the Gutenberg title information as a default.  Override later
+                	// if formally presented
+                	if (!firstLine) {
+                		firstLine = true;
+                		if (line.trim().contains(FIRST_LINE_SECONDARY_TITLE_TAG)) {
+                			String tmp = line.substring(line.indexOf(FIRST_LINE_SECONDARY_TITLE_TAG) + FIRST_LINE_SECONDARY_TITLE_TAG.length()).trim();
+                			if (tmp.startsWith(OF)) {
+                				tmp = tmp.substring(OF.length()).trim();
+                			}
+                			if (tmp.contains(BY)) {
+                                jsonObject.put(TITLE, tmp.substring(0, tmp.lastIndexOf(BY)).trim());
+                                jsonObject.put(AUTHOR, tmp.substring(tmp.lastIndexOf(BY) + BY.length()).trim());
+                                haveAuthor = true;
+                                haveTitle = true;
+                                break;
+                			} else {
+                                jsonObject.put(TITLE, tmp.trim());
+                                haveTitle = true;
+                			}
+                			
+                		}
+                	}
                     // read the gutenberg head info up to the beginning of the
                     // doc
                     if (!foundHdr || !line.trim().startsWith(GUTENBERG_HDR_END) && !line.trim().endsWith(GUTENBERG_HDR_END)) {
@@ -120,13 +158,13 @@ public class ElasticSearchIndex {
                         continue;
                     }
 
-                    if (!haveTitle) {
-                        jsonObject.put("TITLE", line);
+                    if (line.startsWith(TITLE+COLON_CHAR) && !haveTitle) {
+                        jsonObject.put(TITLE, line.substring(TITLE.length()+1).trim());
                         haveTitle = true;
                     }
 
-                    if (line.startsWith(BY) && !haveAuthor) {
-                        jsonObject.put("AUTHOR", line);
+                    if (line.startsWith(AUTHOR+COLON_CHAR) && !haveAuthor) {
+                        jsonObject.put(AUTHOR, line.substring(AUTHOR.length()+1).trim());
                         haveAuthor = true;
                     }
 
@@ -143,21 +181,22 @@ public class ElasticSearchIndex {
 
 //                log.info("Writing message to elasticsearch: " + jsonObject.toJSONString());
 
-                IndexResponse response = client.prepareIndex("hadoop", "gutenberg").setSource(jsonObject.toJSONString()).execute()
-                        .actionGet();
-
-                log.info("Response Info");
-                log.info("  ID created by es: " + response.getId());
-                log.info("  Index create by es: " + response.getIndex());
-                log.info("  Type: " + response.getType());
-                log.info("  Version: " + response.getVersion() + "\n\n");
+                // swap this line out with appending all the request into the bulkRequester
+//                IndexResponse response = client.prepareIndex("hadoop", "gutenberg").setSource(jsonObject.toJSONString()).execute().actionGet();
+                bulkRequest.add(client.prepareIndex("hadoop", "gutenberg").setSource(jsonObject.toJSONString()));
 
             } catch (Exception e) {
-                e.printStackTrace();
+                log.warning(e.getMessage());
                 // done with file;
             }
 
         }
+        
+        BulkResponse bulkResponse = bulkRequest.execute().actionGet();
+        if (bulkResponse.hasFailures()) {
+        	log.warning("Bulk ingest failed: " + bulkResponse.buildFailureMessage());
+        }
+        
         client.close();
 
     }
